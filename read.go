@@ -156,14 +156,16 @@ const (
 	// run to a few hundred kilobytes.
 	maxObjStmBytes = 16 << 20
 
-	// minDecodeBudget and decodeBudgetRatio bound the bytes a Reader's
-	// streams yield in all, counted at every stage from the raw bytes through
-	// each filter: the larger of the floor and the ratio times the file size,
-	// several times what ordinary documents decode. Every other cap holds per
+	// minDecodeBudget, decodeBudgetRatio and maxDecodeBudget bound the bytes a
+	// Reader's streams yield in all, counted at every stage from the raw
+	// bytes through each filter: the larger of the floor and the ratio times
+	// the file size, several times what ordinary documents decode, and never
+	// more than the ceiling. Every other cap holds per
 	// stream or per page, so content shared by many pages could still decode
 	// without end.
 	minDecodeBudget   = 128 << 20
 	decodeBudgetRatio = 32
+	maxDecodeBudget   = 512 << 20
 
 	// maxPredictorColumns bounds the /Columns of a FlateDecode predictor,
 	// which sizes a row buffer.
@@ -173,6 +175,11 @@ const (
 	// built before any byte is read. Real files chain two or three.
 	maxFilters = 8
 )
+
+// decodeBudgetFor returns the decode budget of a file of size bytes.
+func decodeBudgetFor(size int64) int64 {
+	return min(max(minDecodeBudget, decodeBudgetRatio*size), maxDecodeBudget)
+}
 
 // An xrefTable maps object numbers to cross-reference entries: numbers near
 // those stored live in a dense slice, and the rest in a map, so memory tracks
@@ -322,7 +329,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader,
 		end:   end,
 		cache: new(readerCache),
 	}
-	r.cache.limit = max(minDecodeBudget, decodeBudgetRatio*size)
+	r.cache.limit = decodeBudgetFor(size)
 	r.cache.budget.Store(r.cache.limit)
 	r.cache.glyphs.Store(maxDocGlyphs)
 	pos := end - chunk + int64(i)

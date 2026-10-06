@@ -30,6 +30,10 @@ const (
 	// tree walk visits.
 	maxPageTreeNodes = 1 << 20
 
+	// maxPages bounds the pages the page tree may list. A real document
+	// rarely holds a few hundred.
+	maxPages = 2000
+
 	// maxInheritDepth bounds a walk up a chain of /Parent links, counting the
 	// page itself. A page at the bottom of the deepest tree Page accepts has
 	// maxPageTreeDepth ancestors, all of which may carry inherited entries.
@@ -63,9 +67,9 @@ const (
 	maxPageGlyphs = 1 << 18
 
 	// maxDocGlyphs bounds the glyphs text extraction shows across one
-	// Reader's pages, however many pages share a content stream. A 2,054-page
-	// book shows 3.5 million.
-	maxDocGlyphs = 32 * maxPageGlyphs
+	// Reader's pages, however many pages share a content stream. A caller
+	// that extracts each page twice spends twice what the pages show.
+	maxDocGlyphs = 6_000_000
 
 	// maxGstackDepth bounds the graphics states q saves in Page.Content; a q
 	// past it saves none. Each is 400 bytes, so a stream of q from a few
@@ -133,6 +137,9 @@ func (r *Reader) pages() []pageEntry {
 func (r *Reader) walkPages() []pageEntry {
 	w := pageWalk{seen: make(map[objptr]bool)}
 	w.walk(r.Trailer().Key("Root").Key("Pages"), new(unresolved), 1)
+	if w.over {
+		panic(limitf("page tree lists more than %d pages", maxPages))
+	}
 	return w.pages
 }
 
@@ -140,6 +147,7 @@ type pageWalk struct {
 	seen  map[objptr]bool
 	nodes int
 	pages []pageEntry
+	over  bool // the tree lists more than maxPages pages
 }
 
 func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
@@ -162,6 +170,9 @@ func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
 			w.seen[ref] = true
 		}
 		w.kid(kids, i, x, resources, depth)
+		if w.over {
+			return
+		}
 	}
 }
 
@@ -182,6 +193,7 @@ func (w *pageWalk) kid(kids Value, i int, x object, resources *unresolved, depth
 		w.walk(kid, resources, depth+1)
 	case "Page":
 		w.pages = append(w.pages, pageEntry{kids.ptr, x, resources})
+		w.over = len(w.pages) > maxPages
 	}
 }
 
