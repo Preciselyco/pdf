@@ -480,32 +480,34 @@ func TestXrefRowsBounded(t *testing.T) {
 	}
 }
 
+// objStmFile returns a file whose object stream decodes to size bytes, the
+// catalog last.
+func objStmFile(size int) []byte {
+	const catalog = "<< /Type /Catalog /Pages << /Type /Pages /Kids [] /Count 7 >> >>"
+	gap := size - len(catalog) - len(fmt.Sprintf("1 %d ", size))
+	index := fmt.Sprintf("1 %d ", gap)
+	comp := deflate([]byte(index + strings.Repeat("\x00", gap) + catalog))
+
+	var b strings.Builder
+	b.WriteString("%PDF-1.5\n")
+	off := b.Len()
+	fmt.Fprintf(&b, "2 0 obj\n<< /Type /ObjStm /N 1 /First %d /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		len(index), len(comp), comp)
+	xref := b.Len()
+	rows := []byte{0, 0, 0, 0, 0, 2, 0, 0, 2, 0}
+	rows = append(rows, 1, byte(off>>16), byte(off>>8), byte(off), 0)
+	rows = append(rows, 1, byte(xref>>16), byte(xref>>8), byte(xref), 0)
+	fmt.Fprintf(&b, "3 0 obj\n<< /Type /XRef /Size 4 /W [1 3 1] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(rows), rows)
+	fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", xref)
+	return []byte(b.String())
+}
+
 // TestObjectStreamByteCap verifies that an object stream may decode to
 // exactly maxObjStmBytes, and that resolving an object placed further in is
 // refused rather than inflating the whole gap, which nested Flate makes
 // gigabytes from kilobytes.
 func TestObjectStreamByteCap(t *testing.T) {
-	const catalog = "<< /Type /Catalog /Pages << /Type /Pages /Kids [] /Count 7 >> >>"
-	// open returns a file whose object stream decodes to size bytes, the
-	// catalog last.
-	open := func(size int) *Reader {
-		gap := size - len(catalog) - len(fmt.Sprintf("1 %d ", size))
-		index := fmt.Sprintf("1 %d ", gap)
-		comp := deflate([]byte(index + strings.Repeat("\x00", gap) + catalog))
-
-		var b strings.Builder
-		b.WriteString("%PDF-1.5\n")
-		off := b.Len()
-		fmt.Fprintf(&b, "2 0 obj\n<< /Type /ObjStm /N 1 /First %d /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream\nendobj\n",
-			len(index), len(comp), comp)
-		xref := b.Len()
-		rows := []byte{0, 0, 0, 0, 0, 2, 0, 0, 2, 0}
-		rows = append(rows, 1, byte(off>>16), byte(off>>8), byte(off), 0)
-		rows = append(rows, 1, byte(xref>>16), byte(xref>>8), byte(xref), 0)
-		fmt.Fprintf(&b, "3 0 obj\n<< /Type /XRef /Size 4 /W [1 3 1] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(rows), rows)
-		fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", xref)
-		return openPDF(t, []byte(b.String()))
-	}
+	open := func(size int) *Reader { return openPDF(t, objStmFile(size)) }
 
 	r := open(maxObjStmBytes)
 	if p, _ := run(t, func() {

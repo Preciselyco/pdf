@@ -5,7 +5,6 @@
 package pdf
 
 import (
-	"fmt"
 	"io"
 	"runtime"
 	"strings"
@@ -84,7 +83,7 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 	errs := 0
 	malformed := func() {
 		if errs++; errs > maxInterpretErrors {
-			panic(fmt.Errorf("more than %d malformed operands", maxInterpretErrors))
+			panic(limitf("more than %d malformed operands", maxInterpretErrors))
 		}
 	}
 	if strm.Kind() == Array {
@@ -106,7 +105,7 @@ Reading:
 			b.entries = 0
 		}
 		if stk.Len()+b.entries > maxOperands {
-			panic(fmt.Errorf("more than %d operands", maxOperands))
+			panic(limitf("more than %d operands", maxOperands))
 		}
 		tok, ok := readRecover(b, b.readToken)
 		if !ok {
@@ -145,7 +144,7 @@ Reading:
 					panic("cannot begin non-dict")
 				}
 				if len(dicts) >= maxDictStack {
-					panic(fmt.Errorf("begin nests more than %d dicts", maxDictStack))
+					panic(limitf("begin nests more than %d dicts", maxDictStack))
 				}
 				dicts = append(dicts, d.data.(dict))
 				continue

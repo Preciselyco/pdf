@@ -107,7 +107,7 @@ func (b *buffer) reload() bool {
 			b.eof = true
 			return false
 		}
-		b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err)
+		b.errorf("malformed PDF: reading at offset %d: %w", b.offset, err)
 		return false
 	}
 	b.offset += int64(n)
@@ -468,8 +468,7 @@ func (b *buffer) readObject() object {
 	b.depth++
 	defer func() { b.depth-- }()
 	if b.depth > maxObjectDepth {
-		b.errorf("object nesting exceeds maximum depth %d", maxObjectDepth)
-		return nil
+		panic(limitf("object nesting exceeds maximum depth %d", maxObjectDepth))
 	}
 
 	tok := b.readToken()
@@ -598,7 +597,7 @@ func (b *buffer) readDict() object {
 
 func (b *buffer) countEntry() {
 	if b.entries++; b.entries > maxOperands {
-		b.errorf("more than %d entries", maxOperands)
+		panic(limitf("more than %d entries", maxOperands))
 	}
 }
 

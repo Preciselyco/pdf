@@ -7,7 +7,6 @@ package pdf
 import (
 	"bytes"
 	"cmp"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -192,7 +191,7 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 	// its own.
 	defer func() {
 		if e := recover(); e != nil {
-			reader, err = &bytes.Buffer{}, fmt.Errorf("malformed PDF: %v", e)
+			reader, err = &bytes.Buffer{}, fmt.Errorf("malformed PDF: %w", asError(e))
 		}
 	}()
 
@@ -214,7 +213,7 @@ func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
 	// its panics here rather than letting them reach the caller.
 	defer func() {
 		if e := recover(); e != nil {
-			sentences, err = nil, fmt.Errorf("malformed PDF: %v", e)
+			sentences, err = nil, fmt.Errorf("malformed PDF: %w", asError(e))
 		}
 	}()
 
@@ -319,7 +318,7 @@ func (g *glyphBudget) spend(n int) {
 		panic(errPageGlyphs)
 	}
 	if g.r != nil && g.r.cache != nil && g.r.cache.glyphs.Add(-int64(n)) < 0 {
-		panic(fmt.Errorf("document shows more than %d glyphs", maxDocGlyphs))
+		panic(limitf("document shows more than %d glyphs", maxDocGlyphs))
 	}
 }
 
@@ -835,7 +834,7 @@ func operandCount(stk *Stack, n, per int) int {
 func readCmap(toUnicode Value) *cmap {
 	data, err := io.ReadAll(newLimitedReader(toUnicode.Reader(), maxInterpretBytes))
 	if err != nil {
-		panic(fmt.Errorf("reading ToUnicode cmap: %v", err))
+		panic(fmt.Errorf("reading ToUnicode cmap: %w", err))
 	}
 	return parseCmap(memoryStream(data))
 }
@@ -872,7 +871,7 @@ func parseCmap(toUnicode Value) (result *cmap) {
 	entries := 0
 	keep := func() {
 		if entries++; entries > maxCmapEntries {
-			panic("cmap has too many entries")
+			panic(limitf("cmap has more than %d entries", maxCmapEntries))
 		}
 	}
 	ok := true
@@ -1070,11 +1069,11 @@ func popArgs(stk *Stack) []Value {
 func recoverTo(err *error, reset func()) {
 	if r := recover(); r != nil {
 		reset()
-		*err = errors.New(fmt.Sprint(r))
+		*err = asError(r)
 	}
 }
 
-var errPageGlyphs = fmt.Errorf("page shows more than %d glyphs", maxPageGlyphs)
+var errPageGlyphs = limitf("page shows more than %d glyphs", maxPageGlyphs)
 
 // decodeLimit decodes raw with enc, stopping once the text holds limit
 // runes or soon after.
