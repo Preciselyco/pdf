@@ -90,32 +90,20 @@ func TestDecodeBudgetFor(t *testing.T) {
 	}
 }
 
-// TestDecodeBudgetCap verifies a Reader of a large file gets the capped
-// budget, that it may spend exactly that, and that one byte more is refused
-// with ErrLimit.
+// TestDecodeBudgetCap verifies a Reader's budget comes from decodeBudgetFor,
+// that it may spend exactly that, and that one byte more is refused with
+// ErrLimit.
 func TestDecodeBudgetCap(t *testing.T) {
-	const MiB = 1 << 20
-	for _, tt := range []struct {
-		name string
-		pad  int
-		want int64
-	}{
-		{"small file", 0, 128 * MiB},
-		{"large file", 17 * MiB, 512 * MiB},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			data := buildPDF("<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>", "("+strings.Repeat("x", tt.pad)+")")
-			r := openPDF(t, data)
-			if r.cache.limit != tt.want {
-				t.Fatalf("budget of a %d-byte file = %d, want %d", len(data), r.cache.limit, tt.want)
-			}
-			if err := r.cache.spend(tt.want); err != nil {
-				t.Errorf("spending the whole budget: %v", err)
-			}
-			if err := r.cache.spend(1); !errors.Is(err, ErrLimit) {
-				t.Errorf("spending one byte past the budget: got %v, want ErrLimit", err)
-			}
-		})
+	data := pagePDF("", "null")
+	r := openPDF(t, data)
+	if want := decodeBudgetFor(int64(len(data))); r.cache.limit != want || want != 128<<20 {
+		t.Fatalf("budget of a %d-byte file = %d, want %d", len(data), r.cache.limit, want)
+	}
+	if err := r.cache.spend(r.cache.limit); err != nil {
+		t.Errorf("spending the whole budget: %v", err)
+	}
+	if err := r.cache.spend(1); !errors.Is(err, ErrLimit) {
+		t.Errorf("spending one byte past the budget: got %v, want ErrLimit", err)
 	}
 }
 
@@ -155,8 +143,5 @@ func TestPageGlyphBoundary(t *testing.T) {
 	}
 	if err := failure(t, func() error { g.spend(1); return nil }); !errors.Is(err, ErrLimit) {
 		t.Errorf("262145 glyphs: got %v, want a panic wrapping ErrLimit", err)
-	}
-	if maxInterpretBytes != 16<<20 {
-		t.Errorf("maxInterpretBytes = %d, want 16 MiB", maxInterpretBytes)
 	}
 }

@@ -2,7 +2,6 @@ package pdf
 
 import (
 	"bytes"
-	"compress/zlib"
 	"errors"
 	"fmt"
 	"io"
@@ -63,16 +62,6 @@ func TestErrLimitWrapped(t *testing.T) {
 	for range maxFilters + 1 {
 		asciiChain.WriteString("/ASCII85Decode ")
 	}
-	budgetBomb := func() []byte {
-		var z bytes.Buffer
-		zw := zlib.NewWriter(&z)
-		row := bytes.Repeat([]byte{2}, 1<<20)
-		for range minDecodeBudget>>20 + 1 {
-			zw.Write(row)
-		}
-		zw.Close()
-		return z.Bytes()
-	}()
 	objStmIndexed := func() error {
 		data := xrefStreamFile(testObj{num: 2, hdr: "/N NUM /First FIRST", members: []testObj{
 			{num: 3, body: "null"},
@@ -152,7 +141,13 @@ func TestErrLimitWrapped(t *testing.T) {
 			fmt.Sprintf("/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns %d >>", maxPredictorColumns+1),
 			string(deflate([]byte("x"))))},
 		{"filter count", streamOf("/Filter 5 0 R", "x", "["+asciiChain.String()+"]")},
-		{"decode budget", streamOf("/Filter /FlateDecode /DecodeParms << /Predictor 12 >>", string(budgetBomb))},
+		{"decode budget", func() error {
+			body := string(deflate(bytes.Repeat([]byte{2}, 4<<10)))
+			r := openPDF(t, pagePDF("", fmt.Sprintf("<< /Length %d /Filter /FlateDecode /DecodeParms << /Predictor 12 >> >>\nstream\n%s\nendstream", len(body), body)))
+			r.cache.budget.Store(1 << 10)
+			_, err := io.Copy(io.Discard, r.Page(1).V.Key("Contents").Reader())
+			return err
+		}},
 		{"decode budget spent", func() error {
 			r := openPDF(t, pagePDF("", "null"))
 			return r.cache.spend(r.cache.limit + 1)

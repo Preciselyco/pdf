@@ -137,7 +137,7 @@ func (r *Reader) pages() []pageEntry {
 func (r *Reader) walkPages() []pageEntry {
 	w := pageWalk{seen: make(map[objptr]bool)}
 	w.walk(r.Trailer().Key("Root").Key("Pages"), new(unresolved), 1)
-	if w.over {
+	if len(w.pages) > maxPages {
 		panic(limitf("page tree lists more than %d pages", maxPages))
 	}
 	return w.pages
@@ -147,7 +147,6 @@ type pageWalk struct {
 	seen  map[objptr]bool
 	nodes int
 	pages []pageEntry
-	over  bool // the tree lists more than maxPages pages
 }
 
 func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
@@ -170,7 +169,7 @@ func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
 			w.seen[ref] = true
 		}
 		w.kid(kids, i, x, resources, depth)
-		if w.over {
+		if len(w.pages) > maxPages {
 			return
 		}
 	}
@@ -193,7 +192,6 @@ func (w *pageWalk) kid(kids Value, i int, x object, resources *unresolved, depth
 		w.walk(kid, resources, depth+1)
 	case "Page":
 		w.pages = append(w.pages, pageEntry{kids.ptr, x, resources})
-		w.over = len(w.pages) > maxPages
 	}
 }
 
