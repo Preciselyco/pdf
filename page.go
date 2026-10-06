@@ -68,7 +68,9 @@ const (
 	// maxDocGlyphs bounds the glyphs text extraction shows across one
 	// Reader's pages, however many pages share a content stream. A page
 	// counts once however often it is extracted, at the most any extraction
-	// of it shows. A 2,054-page book shows 3.5 million.
+	// of it shows. A 2,054-page book shows 3.5 million glyphs, which is
+	// evidence of density only: maxPages deliberately refuses such a book,
+	// since the files this fork is for are contracts.
 	maxDocGlyphs = 6_000_000
 
 	// maxGstackDepth bounds the graphics states q saves in Page.Content; a q
@@ -85,6 +87,8 @@ type Page struct {
 	// page tree, found as the tree was walked, so that Resources need not
 	// parse the page's ancestors again.
 	inherited *unresolved
+	// num is the page's number, as Reader.Page was given it, or zero.
+	num int
 }
 
 // An unresolved value is resolved only when asked for, so that a value many
@@ -106,7 +110,7 @@ func (r *Reader) Page(num int) Page {
 		return Page{}
 	}
 	e := pages[num-1]
-	return Page{V: r.resolve(e.parent, e.kid), inherited: e.resources}
+	return Page{V: r.resolve(e.parent, e.kid), inherited: e.resources, num: num}
 }
 
 // NumPage returns the number of pages in the PDF file: those its page tree
@@ -143,9 +147,6 @@ func (r *Reader) pages() []pageEntry {
 func (r *Reader) walkPages() []pageEntry {
 	w := pageWalk{seen: make(map[objptr]bool)}
 	w.walk(r.Trailer().Key("Root").Key("Pages"), new(unresolved), 1)
-	if len(w.pages) > maxPages {
-		panic(limitf("page tree lists more than %d pages", maxPages))
-	}
 	return w.pages
 }
 
@@ -178,9 +179,6 @@ func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
 			w.seen[ref] = true
 		}
 		w.kid(kids, i, x, resources, depth)
-		if len(w.pages) > maxPages {
-			return
-		}
 	}
 }
 
@@ -202,6 +200,9 @@ func (w *pageWalk) kid(kids Value, i int, x object, resources *unresolved, depth
 		w.walk(kid, resources, depth+1)
 	case "Page":
 		w.pages = append(w.pages, pageEntry{kids.ptr, x, resources})
+		if len(w.pages) > maxPages {
+			panic(limitf("page tree lists more than %d pages", maxPages))
+		}
 	}
 }
 
@@ -333,9 +334,16 @@ type pageFonts struct {
 // extracted: the Reader keeps the most each page has shown, and a later
 // extraction pays only for what passes it.
 type glyphBudget struct {
-	r    *Reader
-	page objptr // the page's object, or zero if it is not an indirect object
-	n    int
+	r *Reader
+	// num is the page's number in its Reader, or zero for a Page not got
+	// from Reader.Page, which is charged in full every time. Pages cannot be
+	// told apart by object: one written inline in /Kids has none.
+	num int
+	n   int // glyphs this extraction has shown
+	// paid is the most glyphs any extraction of the page was known to have
+	// shown when last looked up; the lock is taken only once n passes it.
+	paid   int
+	looked bool
 }
 
 func (g *glyphBudget) cache() *readerCache {
@@ -343,6 +351,17 @@ func (g *glyphBudget) cache() *readerCache {
 		return nil
 	}
 	return g.r.cache
+}
+
+// lookup loads what the Reader has charged for the page so far.
+func (g *glyphBudget) lookup(c *readerCache) {
+	if g.num == 0 || g.looked {
+		return
+	}
+	g.looked = true
+	c.mu.Lock()
+	g.paid = c.pageGlyphs[g.num]
+	c.mu.Unlock()
 }
 
 func (g *glyphBudget) spend(n int) {
@@ -354,16 +373,24 @@ func (g *glyphBudget) spend(n int) {
 		return
 	}
 	cost := int64(n)
-	if g.page != (objptr{}) {
-		c.mu.Lock()
-		if c.pageGlyphs == nil {
-			c.pageGlyphs = make(map[objptr]int)
+	if g.num != 0 {
+		g.lookup(c)
+		cost = 0
+		if g.n > g.paid {
+			c.mu.Lock()
+			if c.pageGlyphs == nil {
+				c.pageGlyphs = make(map[int]int)
+			}
+			prev := max(c.pageGlyphs[g.num], g.paid)
+			if g.n > prev {
+				cost = int64(g.n - prev)
+				c.pageGlyphs[g.num] = g.n
+			}
+			g.paid = max(g.n, prev)
+			c.mu.Unlock()
 		}
-		cost = int64(max(0, g.n-c.pageGlyphs[g.page]))
-		c.pageGlyphs[g.page] = max(g.n, c.pageGlyphs[g.page])
-		c.mu.Unlock()
 	}
-	if c.glyphs.Add(-cost) < 0 {
+	if cost > 0 && c.glyphs.Add(-cost) < 0 {
 		panic(limitf("document shows more than %d glyphs", maxDocGlyphs))
 	}
 }
@@ -372,20 +399,22 @@ func (g *glyphBudget) spend(n int) {
 func (g *glyphBudget) left() int {
 	n := maxPageGlyphs - g.n
 	if c := g.cache(); c != nil {
-		doc := max(0, c.glyphs.Load())
-		if g.page != (objptr{}) {
+		doc := int(max(0, c.glyphs.Load()))
+		// What the page has already paid for is free, which matters only
+		// once the document budget could be the tighter bound.
+		if g.num != 0 && doc < n {
 			c.mu.Lock()
-			doc += int64(max(0, c.pageGlyphs[g.page]-g.n))
+			doc += max(0, c.pageGlyphs[g.num]-g.n)
 			c.mu.Unlock()
 		}
-		n = min(n, int(doc))
+		n = min(n, doc)
 	}
 	return n
 }
 
 // glyphBudget returns a budget for one extraction of the page.
 func (p Page) glyphBudget() glyphBudget {
-	return glyphBudget{r: p.V.r, page: p.V.ptr}
+	return glyphBudget{r: p.V.r, num: p.num}
 }
 
 // noFont is the font of a name the page does not define. Its encoding is set

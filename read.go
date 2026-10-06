@@ -89,7 +89,10 @@ var DebugOn = false
 // It is safe for concurrent use; goroutines share its caches and its budgets
 // over its lifetime: its streams decode at most the larger of 128 MB and 32
 // times the file size, up to 512 MB, and its pages show at most 6,000,000
-// glyphs, each page counted once. A page whose
+// glyphs, each page counted once. The 512 MB ceiling is flat, so a large
+// file gets no more than that, however big it is, and one whose streams
+// decode to more fails to read; callers should cap the files they accept. A
+// page whose
 // content decodes past 16 MB fails. A caller reading the file through many
 // times should open a new Reader for each pass.
 type Reader struct {
@@ -1032,9 +1035,10 @@ type readerCache struct {
 	// glyphs is what remains of the limit on the glyphs text extraction
 	// shows, which is otherwise bounded only per page.
 	glyphs atomic.Int64
-	// pageGlyphs holds the most glyphs any extraction of a page has shown,
-	// so that a page is charged against glyphs once. Guarded by mu.
-	pageGlyphs map[objptr]int
+	// pageGlyphs holds, by page number, the most glyphs any extraction of a
+	// page has shown, so that a page is charged against glyphs once. Guarded
+	// by mu.
+	pageGlyphs map[int]int
 }
 
 // A budgetReader charges what it reads against its Reader's decode budget.

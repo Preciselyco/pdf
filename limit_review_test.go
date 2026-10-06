@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -166,5 +167,71 @@ func TestLimitMessageNotMalformed(t *testing.T) {
 	_, err = r.GetStyledTexts()
 	if !errors.Is(err, ErrLimit) || strings.Contains(err.Error(), "malformed") {
 		t.Errorf("GetStyledTexts: got %q, want a limit that does not read as malformed", err)
+	}
+}
+
+// TestInlinePagesChargedInFull verifies pages written as direct dicts in
+// /Kids, which have no object of their own, are each charged against the
+// document glyph budget.
+func TestInlinePagesChargedInFull(t *testing.T) {
+	const pages, glyphs = 30, 250000
+	var kids strings.Builder
+	for range pages {
+		kids.WriteString("<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 4 0 R >> >> >> ")
+	}
+	r := openPDF(t, buildPDF(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids ["+kids.String()+"] /Count 30 >>",
+		streamObj("BT /F1 12 Tf ("+strings.Repeat("A", glyphs)+") Tj ET"),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	))
+	var err error
+	shown := 0
+	for i := 1; i <= r.NumPage() && err == nil; i++ {
+		_, err = r.Page(i).GetPlainText(nil)
+		shown += glyphs
+	}
+	if !errors.Is(err, ErrLimit) {
+		t.Errorf("%d inline pages of %d glyphs: got %v after %d glyphs, want ErrLimit", pages, glyphs, err, shown)
+	}
+}
+
+// TestPaidPageSurvivesExhaustion verifies a page already charged can be
+// extracted again once the document budget is spent.
+func TestPaidPageSurvivesExhaustion(t *testing.T) {
+	r := openPDF(t, glyphsPDF(2, 1000))
+	if _, err := r.Page(1).GetPlainText(nil); err != nil {
+		t.Fatal(err)
+	}
+	r.cache.glyphs.Store(500)
+	if _, err := r.Page(2).GetPlainText(nil); !errors.Is(err, ErrLimit) {
+		t.Fatalf("page 2: got %v, want ErrLimit", err)
+	}
+	if _, err := r.Page(1).GetPlainText(nil); err != nil {
+		t.Errorf("page 1 again after exhaustion: %v", err)
+	}
+}
+
+// TestGlyphChargeConcurrent verifies goroutines extracting one page together
+// charge it once.
+func TestGlyphChargeConcurrent(t *testing.T) {
+	data := glyphsPDF(1, 2000)
+	one := openPDF(t, data)
+	one.Page(1).GetPlainText(nil)
+	want := one.cache.glyphs.Load()
+
+	r := openPDF(t, data)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Page(1).GetPlainText(nil)
+			r.Page(1).Content()
+		}()
+	}
+	wg.Wait()
+	if got := r.cache.glyphs.Load(); got != want {
+		t.Errorf("8 goroutines left %d glyphs, one extraction leaves %d", got, want)
 	}
 }
