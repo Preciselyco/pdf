@@ -4,13 +4,15 @@
 
 A simple Go library which enables reading PDF files. Forked from https://github.com/rsc/pdf
 
+Fork of ledongthuc/pdf with the hostile-input fixes from Cwooper/pdf `harden`, maintained by Preciselyco for Lexnus.
+
 Features
   - Get plain text content (without format)
   - Get Content (including all font and formatting information)
 
 ## Install:
 
-`go get -u github.com/ledongthuc/pdf`
+`go get -u github.com/Preciselyco/pdf`
 
 ## Examples:
 
@@ -26,7 +28,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/Preciselyco/pdf"
 )
 
 func main() {
@@ -57,7 +59,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/Preciselyco/pdf"
 )
 
 func main() {
@@ -94,7 +96,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/Preciselyco/pdf"
 )
 
 func main() {
