@@ -76,7 +76,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"runtime"
 	"sort"
 	"strconv"
 	"sync"
@@ -89,7 +88,8 @@ var DebugOn = false
 // A Reader is a single PDF file open for reading.
 // It is safe for concurrent use; goroutines share its caches and its budgets
 // over its lifetime: its streams decode at most the larger of 128 MB and 32
-// times the file size, and its pages show at most 2^23 glyphs. A page whose
+// times the file size, up to 512 MB, and its pages show at most 6,000,000
+// glyphs, each page counted once. A page whose
 // content decodes past 16 MB fails. A caller reading the file through many
 // times should open a new Reader for each pass.
 type Reader struct {
@@ -442,13 +442,13 @@ func readXrefStream(r *Reader, b *buffer) (*xrefTable, objptr, dict, error) {
 	}
 	// A negative /Size would panic in make.
 	if err := checkObjectNumber(size); err != nil {
-		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream Size: %w", err)
+		return nil, objptr{}, nil, wrapf("malformed PDF: xref stream Size", err)
 	}
 	table := newXrefTable(size)
 
 	table, err := readXrefStreamData(r, strm, table, size)
 	if err != nil {
-		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %w", err)
+		return nil, objptr{}, nil, wrapf("malformed PDF", err)
 	}
 
 	err = readPrevXrefs(r, strm.hdr["Prev"], func(b *buffer) (object, error) {
@@ -475,7 +475,7 @@ func readXrefStream(r *Reader, b *buffer) (*xrefTable, objptr, dict, error) {
 		var dataErr error
 		table, dataErr = readXrefStreamData(r, prev.data.(stream), table, psize)
 		if dataErr != nil {
-			return nil, fmt.Errorf("malformed PDF: reading xref prev stream: %w", dataErr)
+			return nil, wrapf("malformed PDF: reading xref prev stream", dataErr)
 		}
 		return prevstrm.hdr["Prev"], nil
 	})
@@ -508,10 +508,7 @@ func readXrefStreamData(r *Reader, strm stream, table *xrefTable, size int64) (*
 		// A /W entry is a field width in bytes. A negative one slices the
 		// read buffer with a negative bound below, and a huge one makes
 		// wtotal, and with it the buffer, arbitrarily large.
-		if i > maxXrefFieldWidth {
-			return nil, limitf("invalid W array %v: field wider than %d bytes", objfmt(ww), maxXrefFieldWidth)
-		}
-		if i < 0 {
+		if i < 0 || i > maxXrefFieldWidth {
 			return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
 		}
 		w = append(w, int(i))
@@ -610,7 +607,7 @@ func ensureXrefLen(table []xref, x, limit int) []xref {
 func readXrefTable(r *Reader, b *buffer) (*xrefTable, objptr, dict, error) {
 	table, err := readXrefTableData(b, newXrefTable(0))
 	if err != nil {
-		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %w", err)
+		return nil, objptr{}, nil, wrapf("malformed PDF", err)
 	}
 
 	trailer, ok := b.readObject().(dict)
@@ -625,7 +622,7 @@ func readXrefTable(r *Reader, b *buffer) (*xrefTable, objptr, dict, error) {
 		var dataErr error
 		table, dataErr = readXrefTableData(b, table)
 		if dataErr != nil {
-			return nil, fmt.Errorf("malformed PDF: %w", dataErr)
+			return nil, wrapf("malformed PDF", dataErr)
 		}
 		prevTrailer, ok := b.readObject().(dict)
 		if !ok {
@@ -667,7 +664,7 @@ func readXrefTableData(b *buffer, table *xrefTable) (*xrefTable, error) {
 		}
 		for i := 0; i < int(n); i++ {
 			if table.rows++; table.rows > maxXrefRows {
-				return nil, limitf("malformed xref table: more than %d rows", maxXrefRows)
+				return nil, limitf("xref table holds more than %d rows", maxXrefRows)
 			}
 			off, ok1 := b.readToken().(int64)
 			gen, ok2 := b.readToken().(int64)
@@ -680,7 +677,7 @@ func readXrefTableData(b *buffer, table *xrefTable) (*xrefTable, error) {
 			}
 			x := int(start) + i
 			if table.n >= maxXrefEntries {
-				return nil, limitf("malformed xref table: more than %d entries", maxXrefEntries)
+				return nil, limitf("xref table holds more than %d entries", maxXrefEntries)
 			}
 			if alloc == "n" && table.get(uint32(x)).offset == 0 {
 				table.put(x, xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)})
@@ -1035,6 +1032,9 @@ type readerCache struct {
 	// glyphs is what remains of the limit on the glyphs text extraction
 	// shows, which is otherwise bounded only per page.
 	glyphs atomic.Int64
+	// pageGlyphs holds the most glyphs any extraction of a page has shown,
+	// so that a page is charged against glyphs once. Guarded by mu.
+	pageGlyphs map[objptr]int
 }
 
 // A budgetReader charges what it reads against its Reader's decode budget.
@@ -1162,7 +1162,7 @@ func (r *Reader) loadObjStm(ptr objptr) *objStm {
 func (s *objStm) index(r *Reader, n, first int64) {
 	defer func() {
 		if x := recover(); x != nil {
-			if _, ok := x.(runtime.Error); ok {
+			if fatal(x) {
 				panic(x)
 			}
 			s.scanErr = asError(x)

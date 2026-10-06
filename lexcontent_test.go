@@ -32,7 +32,9 @@ func TestOperandCapCountsEntries(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mustPanic(t, "operands", func() { Interpret(rawStream(tt.content), nop) })
+			// A limit tripped by the lexer reads "entries", and one by
+			// Interpret "operands"; either is raised, never skipped.
+			mustPanic(t, fmt.Sprintf("more than %d", maxOperands), func() { Interpret(rawStream(tt.content), nop) })
 		})
 	}
 

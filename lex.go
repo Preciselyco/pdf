@@ -107,7 +107,7 @@ func (b *buffer) reload() bool {
 			b.eof = true
 			return false
 		}
-		b.errorf("malformed PDF: reading at offset %d: %w", b.offset, err)
+		b.errorf("%w", wrapf(fmt.Sprintf("malformed PDF: reading at offset %d", b.offset), err))
 		return false
 	}
 	b.offset += int64(n)

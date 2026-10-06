@@ -3,6 +3,7 @@ package pdf
 import (
 	"errors"
 	"fmt"
+	"runtime"
 )
 
 // ErrLimit is wrapped by every error the package raises because the input
@@ -24,4 +25,23 @@ func asError(x any) error {
 		return err
 	}
 	return fmt.Errorf("%v", x)
+}
+
+// fatal reports whether a panic value recovered while reading must be raised
+// again rather than taken for malformed input to skip: a runtime error is a
+// bug, and a limit is no reason to drop part of a document quietly.
+func fatal(e any) bool {
+	if _, ok := e.(runtime.Error); ok {
+		return true
+	}
+	return errors.Is(asError(e), ErrLimit)
+}
+
+// wrapf prefixes err with prefix, unless err is a limit, which is not a
+// malformed file and keeps its own message.
+func wrapf(prefix string, err error) error {
+	if errors.Is(err, ErrLimit) {
+		return err
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
 }

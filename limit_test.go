@@ -41,12 +41,6 @@ func TestErrLimitWrapped(t *testing.T) {
 		table.n = maxXrefEntries
 		return table
 	}
-	xrefStream := func(w array, data string) error {
-		r := &Reader{f: bytes.NewReader([]byte(data)), end: int64(len(data))}
-		hdr := dict{name("Length"): int64(len(data)), name("W"): w, name("Index"): array{int64(1), int64(1)}}
-		_, err := readXrefStreamData(r, stream{hdr, objptr{}, 0}, newXrefTable(0), 2)
-		return err
-	}
 	// streamOf returns the error reading the /Contents of a one-page file
 	// whose second object is stream with header hdr and body.
 	streamOf := func(hdr, body string, objs ...string) func() error {
@@ -129,9 +123,6 @@ func TestErrLimitWrapped(t *testing.T) {
 			_, err := readXrefStreamData(r, stream{hdr, objptr{}, 0}, table, 2)
 			return err
 		}},
-		{"xref /W field width", func() error {
-			return xrefStream(array{int64(maxXrefFieldWidth + 1), int64(1), int64(1)}, "\x00")
-		}},
 		{"compressed xref stream entries", func() error {
 			const rows = 1 << 23
 			comp := deflate(bytes.Repeat([]byte{1, 9, 0}, rows))
@@ -169,10 +160,6 @@ func TestErrLimitWrapped(t *testing.T) {
 		}},
 		{"Interpret dict stack", func() error {
 			Interpret(rawStream(strings.Repeat("<<>> begin ", maxDictStack+1)), nop)
-			return nil
-		}},
-		{"Interpret malformed tokens", func() error {
-			Interpret(rawStream(strings.Repeat("[) ", maxInterpretErrors+1)), nop)
 			return nil
 		}},
 		{"object nesting", func() error {
@@ -236,6 +223,17 @@ func TestMalformedIsNotLimit(t *testing.T) {
 		fn   func() error
 	}{
 		{"not a PDF", func() error { return openBytes([]byte("hello, world, this is not a PDF")) }},
+		{"/W field wider than 8", func() error {
+			data := "\x00"
+			r := &Reader{f: bytes.NewReader([]byte(data)), end: int64(len(data))}
+			hdr := dict{name("Length"): int64(len(data)), name("W"): array{int64(maxXrefFieldWidth + 1), int64(1), int64(1)}, name("Index"): array{int64(1), int64(1)}}
+			_, err := readXrefStreamData(r, stream{hdr, objptr{}, 0}, newXrefTable(0), 2)
+			return err
+		}},
+		{"too many malformed operands", func() error {
+			Interpret(rawStream(strings.Repeat("[) ", maxInterpretErrors+1)), func(*Stack, string) {})
+			return nil
+		}},
 		{"negative /W width", func() error {
 			data := "\x00"
 			r := &Reader{f: bytes.NewReader([]byte(data)), end: int64(len(data))}

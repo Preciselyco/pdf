@@ -7,11 +7,9 @@ package pdf
 import (
 	"bytes"
 	"cmp"
-	"errors"
 	"fmt"
 	"io"
 	"math"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -68,8 +66,9 @@ const (
 	maxPageGlyphs = 1 << 18
 
 	// maxDocGlyphs bounds the glyphs text extraction shows across one
-	// Reader's pages, however many pages share a content stream. A caller
-	// that extracts each page twice spends twice what the pages show.
+	// Reader's pages, however many pages share a content stream. A page
+	// counts once however often it is extracted, at the most any extraction
+	// of it shows. A 2,054-page book shows 3.5 million.
 	maxDocGlyphs = 6_000_000
 
 	// maxGstackDepth bounds the graphics states q saves in Page.Content; a q
@@ -98,6 +97,9 @@ type unresolved struct {
 // Page returns the page for the given page number.
 // Page numbers are indexed starting at 1, not 0.
 // If the page is not found, Page returns a Page with p.V.IsNull().
+//
+// Page panics with an error wrapping ErrLimit if the file exceeds a safety
+// limit, as NumPage does. A caller reading untrusted input must recover.
 func (r *Reader) Page(num int) Page {
 	pages := r.pages()
 	if num < 1 || num > len(pages) {
@@ -109,6 +111,9 @@ func (r *Reader) Page(num int) Page {
 
 // NumPage returns the number of pages in the PDF file: those its page tree
 // lists, whatever its /Count claims.
+//
+// NumPage panics with an error wrapping ErrLimit if the page tree exceeds a
+// safety limit. A caller reading untrusted input must recover.
 func (r *Reader) NumPage() int {
 	return len(r.pages())
 }
@@ -151,7 +156,10 @@ type pageWalk struct {
 }
 
 func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
-	if depth > maxPageTreeDepth || node.Key("Type").Name() != "Pages" {
+	if depth > maxPageTreeDepth {
+		panic(limitf("page tree nests more than %d levels", maxPageTreeDepth))
+	}
+	if node.Key("Type").Name() != "Pages" {
 		return
 	}
 	if d, _ := node.data.(dict); d["Resources"] != nil {
@@ -161,7 +169,7 @@ func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
 	entries, _ := kids.data.(array)
 	for i, x := range entries {
 		if w.nodes++; w.nodes > maxPageTreeNodes {
-			return
+			panic(limitf("page tree has more than %d nodes", maxPageTreeNodes))
 		}
 		if ref, ok := x.(objptr); ok {
 			if w.seen[ref] {
@@ -183,7 +191,7 @@ func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
 func (w *pageWalk) kid(kids Value, i int, x object, resources *unresolved, depth int) {
 	defer func() {
 		if e := recover(); e != nil {
-			if _, ok := e.(runtime.Error); ok || errors.Is(asError(e), ErrLimit) {
+			if fatal(e) {
 				panic(e)
 			}
 		}
@@ -203,7 +211,7 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 	// its own.
 	defer func() {
 		if e := recover(); e != nil {
-			reader, err = &bytes.Buffer{}, fmt.Errorf("malformed PDF: %w", asError(e))
+			reader, err = &bytes.Buffer{}, wrapf("malformed PDF", asError(e))
 		}
 	}()
 
@@ -225,7 +233,7 @@ func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
 	// its panics here rather than letting them reach the caller.
 	defer func() {
 		if e := recover(); e != nil {
-			sentences, err = nil, fmt.Errorf("malformed PDF: %w", asError(e))
+			sentences, err = nil, wrapf("malformed PDF", asError(e))
 		}
 	}()
 
@@ -320,16 +328,42 @@ type pageFonts struct {
 // A glyphBudget counts the glyphs one page's text extraction shows, or the
 // values it builds for them, against maxPageGlyphs and its Reader's
 // document-wide budget.
+//
+// A page is charged against the document once, however many times it is
+// extracted: the Reader keeps the most each page has shown, and a later
+// extraction pays only for what passes it.
 type glyphBudget struct {
-	r *Reader
-	n int
+	r    *Reader
+	page objptr // the page's object, or zero if it is not an indirect object
+	n    int
+}
+
+func (g *glyphBudget) cache() *readerCache {
+	if g.r == nil {
+		return nil
+	}
+	return g.r.cache
 }
 
 func (g *glyphBudget) spend(n int) {
 	if g.n += n; g.n > maxPageGlyphs {
 		panic(errPageGlyphs)
 	}
-	if g.r != nil && g.r.cache != nil && g.r.cache.glyphs.Add(-int64(n)) < 0 {
+	c := g.cache()
+	if c == nil {
+		return
+	}
+	cost := int64(n)
+	if g.page != (objptr{}) {
+		c.mu.Lock()
+		if c.pageGlyphs == nil {
+			c.pageGlyphs = make(map[objptr]int)
+		}
+		cost = int64(max(0, g.n-c.pageGlyphs[g.page]))
+		c.pageGlyphs[g.page] = max(g.n, c.pageGlyphs[g.page])
+		c.mu.Unlock()
+	}
+	if c.glyphs.Add(-cost) < 0 {
 		panic(limitf("document shows more than %d glyphs", maxDocGlyphs))
 	}
 }
@@ -337,10 +371,21 @@ func (g *glyphBudget) spend(n int) {
 // left returns how many more glyphs the page may show.
 func (g *glyphBudget) left() int {
 	n := maxPageGlyphs - g.n
-	if g.r != nil && g.r.cache != nil {
-		n = min(n, int(max(0, g.r.cache.glyphs.Load())))
+	if c := g.cache(); c != nil {
+		doc := max(0, c.glyphs.Load())
+		if g.page != (objptr{}) {
+			c.mu.Lock()
+			doc += int64(max(0, c.pageGlyphs[g.page]-g.n))
+			c.mu.Unlock()
+		}
+		n = min(n, int(doc))
 	}
 	return n
+}
+
+// glyphBudget returns a budget for one extraction of the page.
+func (p Page) glyphBudget() glyphBudget {
+	return glyphBudget{r: p.V.r, page: p.V.ptr}
 }
 
 // noFont is the font of a name the page does not define. Its encoding is set
@@ -577,6 +622,9 @@ func (f Font) Width(code int) float64 {
 // The receiver is a pointer so the parsed encoding is cached on the Font;
 // with a value receiver the assignment to f.enc would be discarded with the
 // copy, defeating the caching entirely.
+//
+// Encoder panics with an error wrapping ErrLimit if the font's ToUnicode cmap
+// exceeds a safety limit. A caller reading untrusted input must recover.
 func (f *Font) Encoder() TextEncoding {
 	if f.enc == nil { // caching the Encoder so we don't have to continually parse charmap
 		f.enc = f.getEncoder()
@@ -876,7 +924,7 @@ func parseCmap(toUnicode Value) (result *cmap) {
 		if r := recover(); r != nil {
 			// A limit is not a malformed cmap: raise it, as a cmap read
 			// past its byte cap is.
-			if errors.Is(asError(r), ErrLimit) {
+			if fatal(r) {
 				panic(r)
 			}
 			result = nil
@@ -1142,7 +1190,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 	showText := func(s string) {
 		textBuilder.WriteString(s)
 	}
-	glyphs := glyphBudget{r: p.V.r}
+	glyphs := p.glyphBudget()
 	showEncodedText := func(s string) {
 		textBuilder.WriteString(decodeText(enc, s, &glyphs))
 	}
@@ -1306,7 +1354,7 @@ func (p Page) walkTextBlocks(emit func(x, y float64, s string)) {
 
 	var enc TextEncoding = &nopEncoder{}
 	var currentX, currentY float64
-	glyphs := glyphBudget{r: p.V.r}
+	glyphs := p.glyphBudget()
 	// Each Text costs its glyphs, and an empty one, as Td makes, costs one.
 	show := func(raw string) {
 		s := decodeText(enc, raw, &glyphs)
@@ -1377,6 +1425,10 @@ func (p Page) walkTextBlocks(emit func(x, y float64, s string)) {
 }
 
 // Content returns the page's content.
+//
+// Content has no error to return, so it panics with an error wrapping
+// ErrLimit if the page exceeds a safety limit, and with other errors on
+// malformed content. A caller reading untrusted input must recover.
 func (p Page) Content() Content {
 	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
@@ -1392,7 +1444,7 @@ func (p Page) Content() Content {
 	}
 
 	var text []Text
-	glyphs := glyphBudget{r: p.V.r}
+	glyphs := p.glyphBudget()
 	// glyph shows ch, w0 wide in glyph space, at the text position.
 	glyph := func(ch rune, w0 float64) {
 		glyphs.spend(1)
@@ -1682,7 +1734,7 @@ type Outline struct {
 // The Outline returned is the root of the outline tree and typically has no Title itself.
 // That is, the children of the returned root are the top-level entries in the outline.
 // A malformed reference somewhere in the tree yields the empty outline, as a
-// missing /Outlines does. The tree is cut off past 65,536 items or 128
+// missing /Outlines does, and so does an exhausted limit, with no error. The tree is cut off past 65,536 items or 128
 // levels, and titles past the first 1 MB of them read as empty.
 func (r *Reader) Outline() (x Outline) {
 	var err error

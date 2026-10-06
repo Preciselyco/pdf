@@ -5,8 +5,8 @@
 package pdf
 
 import (
+	"fmt"
 	"io"
-	"runtime"
 	"strings"
 )
 
@@ -83,7 +83,7 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 	errs := 0
 	malformed := func() {
 		if errs++; errs > maxInterpretErrors {
-			panic(limitf("more than %d malformed operands", maxInterpretErrors))
+			panic(fmt.Errorf("more than %d malformed operands", maxInterpretErrors))
 		}
 	}
 	if strm.Kind() == Array {
@@ -241,10 +241,10 @@ func readRecover[T any](b *buffer, read func() T) (v T, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			// Parse errors are raised with panic(fmt.Errorf(...)) and mean
-			// "discard this operand and keep going". Anything else (nil
-			// deref, index out of range, ...) is a genuine bug and must not
-			// be silently swallowed as malformed input.
-			if _, isRuntime := r.(runtime.Error); isRuntime || b.readFailed {
+			// "discard this operand and keep going". A runtime error is a
+			// genuine bug, and a limit means the stream cannot be read as
+			// the file intends; neither may be swallowed as malformed input.
+			if fatal(r) || b.readFailed {
 				panic(r)
 			}
 			ok = false

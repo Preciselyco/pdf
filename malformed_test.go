@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -405,7 +406,15 @@ func TestCyclicReferences(t *testing.T) {
 		node[name("Kids")] = array{node}
 		r := newReader()
 		r.trailer = dict{name("Root"): dict{name("Pages"): node}}
-		mustNotCrash(t, func() { r.Page(5) })
+		// The tree nests without end through direct objects, which no seen
+		// set catches: it is refused as past the depth cap, and must end.
+		p, timedOut := run(t, func() { r.Page(5) })
+		if timedOut {
+			t.Error("did not return")
+		}
+		if err, _ := p.(error); p != nil && !errors.Is(err, ErrLimit) {
+			t.Errorf("panicked: %v", p)
+		}
 	})
 
 	t.Run("outline first", func(t *testing.T) {
