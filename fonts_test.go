@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -147,7 +148,7 @@ func TestCmapLookup(t *testing.T) {
 }
 
 // TestCmapEntryCap verifies that a cmap holding more entries than a full
-// CID table needs is refused, and that entries no code can match, 72 bytes
+// CID table needs is refused with ErrLimit, and that entries no code can match, 72 bytes
 // each for 6 bytes of input, are not kept.
 func TestCmapEntryCap(t *testing.T) {
 	block := func(n int) string {
@@ -162,8 +163,12 @@ func TestCmapEntryCap(t *testing.T) {
 	if m := readCmap(rawStream(block(maxCmapEntries))); m == nil {
 		t.Error("readCmap refused a cmap at the entry cap")
 	}
-	if m := readCmap(rawStream(block(maxCmapEntries) + "1 beginbfchar <ffffff> <0041> endbfchar")); m != nil {
-		t.Error("readCmap kept a cmap past the entry cap")
+	// Past the cap the limit is raised, not read as no cmap.
+	if err := failure(t, func() error {
+		readCmap(rawStream(block(maxCmapEntries) + "1 beginbfchar <ffffff> <0041> endbfchar"))
+		return nil
+	}); !errors.Is(err, ErrLimit) {
+		t.Errorf("readCmap past the entry cap: got %v, want a panic wrapping ErrLimit", err)
 	}
 	junk := "80000 beginbfrange " + strings.Repeat("()()()", 80000) + " endbfrange\n" +
 		"100000 beginbfchar " + strings.Repeat("()()", 100000) + " endbfchar\n"

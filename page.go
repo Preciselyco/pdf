@@ -7,6 +7,7 @@ package pdf
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -177,11 +178,12 @@ func (w *pageWalk) walk(node Value, resources *unresolved, depth int) {
 
 // kid walks kids' entry i, skipping it if it fails to parse, so that one
 // malformed node or page loses only the pages under it. A runtime error is a
-// bug, not malformed input, and is raised again.
+// bug, not malformed input, and a limit is no reason to drop pages quietly;
+// both are raised again.
 func (w *pageWalk) kid(kids Value, i int, x object, resources *unresolved, depth int) {
 	defer func() {
 		if e := recover(); e != nil {
-			if _, ok := e.(runtime.Error); ok {
+			if _, ok := e.(runtime.Error); ok || errors.Is(asError(e), ErrLimit) {
 				panic(e)
 			}
 		}
@@ -872,6 +874,11 @@ func parseCmap(toUnicode Value) (result *cmap) {
 	// not escape into callers that cannot report it.
 	defer func() {
 		if r := recover(); r != nil {
+			// A limit is not a malformed cmap: raise it, as a cmap read
+			// past its byte cap is.
+			if errors.Is(asError(r), ErrLimit) {
+				panic(r)
+			}
 			result = nil
 		}
 	}()
